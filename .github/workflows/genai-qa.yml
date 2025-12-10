@@ -140,23 +140,27 @@ jobs:
           echo "$body" > generated_tests.json
           echo "✅ Tests generated successfully"
           
-          # Extract execution_id
-          execution_id=$(echo "$body" | jq -r '.execution_id // empty')
-          echo "execution_id=$execution_id" >> $GITHUB_OUTPUT
+          # Extract request_id (used for tracking in database)
+          request_id=$(echo "$body" | jq -r '.request_id // empty')
+          echo "request_id=$request_id" >> $GITHUB_OUTPUT
 
       - name: Run generated tests
         id: run_tests
         run: |
           echo "🧪 Running tests on backend..."
           
-          # Read generated tests
-          generated_tests=$(cat generated_tests.json | jq -r '.tests // .generated_tests // empty')
+          # Read the response field from generated_tests.json (this contains the actual test code)
+          generated_tests=$(cat generated_tests.json | jq -r '.response // .tests // .generated_tests // empty')
           
           if [ -z "$generated_tests" ] || [ "$generated_tests" = "null" ]; then
             echo "❌ No tests found in generated_tests.json"
+            echo "Contents of generated_tests.json:"
             cat generated_tests.json
             exit 1
           fi
+          
+          # Get the request_id from the generation response
+          request_id=$(cat generated_tests.json | jq -r '.request_id // empty')
           
           # Build payload for test execution
           run_payload=$(python3 -c "
@@ -164,12 +168,12 @@ jobs:
 
           tests = '''$generated_tests'''
           language = '${{ steps.prepare_code.outputs.language }}'
-          execution_id = '${{ steps.generate_tests.outputs.execution_id }}'
+          request_id = '$request_id'
 
           payload = {
               'tests': tests,
               'language': language,
-              'execution_id': execution_id
+              'request_id': request_id
           }
 
           print(json.dumps(payload))
@@ -199,7 +203,7 @@ jobs:
           result_id=$(echo "$body" | jq -r '.execution_id // .result_id // .id // empty')
           
           if [ -z "$result_id" ]; then
-            result_id="${{ steps.generate_tests.outputs.execution_id }}"
+            result_id="$request_id"
           fi
           
           echo "result_id=$result_id" >> $GITHUB_OUTPUT
