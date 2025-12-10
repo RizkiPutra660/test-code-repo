@@ -29,14 +29,15 @@ jobs:
           echo "code=$CODE" >> $GITHUB_OUTPUT
 
       - name: Generate tests via backend
-        id: gen
+        shell: bash
         run: |
+          set -euo pipefail
           RESP=$(curl -sS -X POST "$BACKEND_URL/api/generate-tests" \
             -H "Content-Type: application/json" \
             -d "{\"message\":${{ steps.read.outputs.code }},\"language\":\"auto\",\"context\":\"CI run\"}")
           echo "$RESP" | jq .
           REQ_ID=$(echo "$RESP" | jq -r '.request_id')
-          echo "req_id=$REQ_ID" >> $GITHUB_OUTPUT
+          echo "req_id=$REQ_ID" >> "$GITHUB_OUTPUT"
           echo "$RESP" > generated_tests.json
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
