@@ -1,2 +1,2 @@
-def sum(a,b): #sum6
+def sum(a,b): #sum7
     return a + b
