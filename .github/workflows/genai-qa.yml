@@ -31,29 +31,29 @@ jobs:
         run: |
           echo "🔐 Authenticating with backend..."
           
-          # Login to get JWT token
-          response=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.BACKEND_URL }}/api/login" \
+          # Login and capture the Set-Cookie header with the JWT token
+          response=$(curl -s -i -X POST "${{ secrets.BACKEND_URL }}/api/login" \
             -H "Content-Type: application/json" \
             -d '{"email":"admin@example.com","password":"admin123"}')
           
-          # Split response and status code
-          http_code=$(echo "$response" | tail -n1)
-          body=$(echo "$response" | sed '$d')
+          # Extract HTTP status
+          http_code=$(echo "$response" | grep -oP 'HTTP/\S+ \K\d+' | head -n 1)
           
           echo "HTTP Status: $http_code"
           
           if [ "$http_code" != "200" ]; then
             echo "❌ Login failed with status $http_code"
-            echo "Response: $body"
+            echo "$response"
             exit 1
           fi
           
-          # Extract token from response
-          token=$(echo "$body" | jq -r '.token // .access_token // empty')
+          # Extract JWT token from Set-Cookie header
+          token=$(echo "$response" | grep -i 'set-cookie: access_token=' | sed 's/.*access_token=\([^;]*\).*/\1/' | tr -d '\r')
           
-          if [ -z "$token" ] || [ "$token" = "null" ]; then
-            echo "❌ Failed to extract token from response"
-            echo "Response body: $body"
+          if [ -z "$token" ]; then
+            echo "❌ Failed to extract token from Set-Cookie header"
+            echo "Response headers:"
+            echo "$response" | head -n 20
             exit 1
           fi
           
