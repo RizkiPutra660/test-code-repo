@@ -14,53 +14,69 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Find a source file to test (adjust the pattern to your repo)
+      # Find a source file (adjust patterns if needed)
       - name: Select a code file
         id: pick
-        run: |
-          FILE=$(find . -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.java" \) | head -1)
-          if [ -z "$FILE" ]; then echo "No code file found"; exit 1; fi
-          echo "file=$FILE" >> $GITHUB_OUTPUT
-
-      - name: Read code content
-        id: read
-        run: |
-          CODE=$(cat "${{ steps.pick.outputs.file }}" | python -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-          echo "code=$CODE" >> $GITHUB_OUTPUT
-
-      - name: Generate tests via backend
         shell: bash
         run: |
           set -euo pipefail
+          FILE=$(find . -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.java" \) | head -1)
+          if [ -z "$FILE" ]; then echo "No code file found"; exit 1; fi
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      # Read file as base64 to avoid JSON/shell escaping issues
+      - name: Read code content (base64)
+        id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          CODE_B64=$(base64 -w0 "${{ steps.pick.outputs.file }}")
+          echo "code_b64=$CODE_B64" >> "$GITHUB_OUTPUT"
+
+      - name: Generate tests via backend
+        id: gen
+        shell: bash
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          set -euo pipefail
+          CODE=$(echo "${{ steps.read.outputs.code_b64 }}" | base64 -d)
+          PAYLOAD=$(python - <<'PY'
+          import json, os
+          code = os.environ["CODE"]
+          print(json.dumps({"message": code, "language": "auto", "context": "CI run"}))
+          PY
+          )
           RESP=$(curl -sS -X POST "$BACKEND_URL/api/generate-tests" \
             -H "Content-Type: application/json" \
-            -d "{\"message\":${{ steps.read.outputs.code }},\"language\":\"auto\",\"context\":\"CI run\"}")
+            -d "$PAYLOAD")
           echo "$RESP" | jq .
           REQ_ID=$(echo "$RESP" | jq -r '.request_id')
           echo "req_id=$REQ_ID" >> "$GITHUB_OUTPUT"
           echo "$RESP" > generated_tests.json
-        env:
-          BACKEND_URL: ${{ secrets.BACKEND_URL }}
 
       - name: Execute tests via backend
         id: run_tests
+        shell: bash
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
         run: |
+          set -euo pipefail
           RESP=$(curl -sS -X POST "$BACKEND_URL/api/run-tests" \
             -H "Content-Type: application/json" \
             -d "{\"request_id\":\"${{ steps.gen.outputs.req_id }}\"}")
           echo "$RESP" | jq .
           EXEC_ID=$(echo "$RESP" | jq -r '.execution_id')
-          echo "exec_id=$EXEC_ID" >> $GITHUB_OUTPUT
-        env:
-          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          echo "exec_id=$EXEC_ID" >> "$GITHUB_OUTPUT"
 
       - name: Download JUnit XML
-        run: |
-          curl -sS "$BACKEND_URL/api/results/${{ steps.run_tests.outputs.exec_id }}/junit" \
-            -o junit-results.xml
-          ls -l junit-results.xml
+        shell: bash
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          set -euo pipefail
+          curl -sS "$BACKEND_URL/api/results/${{ steps.run_tests.outputs.exec_id }}/junit" -o junit-results.xml
+          ls -l junit-results.xml
 
       - name: Publish test report to PR
         uses: EnricoMi/publish-unit-test-result-action@v2
