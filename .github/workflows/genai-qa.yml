@@ -41,6 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           CODE=$(echo "${{ steps.read.outputs.code_b64 }}" | base64 -d)
+          export CODE
           PAYLOAD=$(python - <<'PY'
           import json, os
           code = os.environ["CODE"]
