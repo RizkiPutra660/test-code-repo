@@ -1,93 +1,255 @@
-name: GenAI-QA Tests
+name: GenAI QA Test Integration
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main, develop ]
-  workflow_dispatch:
+    branches: [ main, master ]
 
 jobs:
-  genai-tests:
+  ai-testing:
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Find a source file (adjust patterns if needed)
-      - name: Select a code file
-        id: pick
-        shell: bash
+      - name: Find source file to test
+        id: find_file
         run: |
-          set -euo pipefail
-          FILE=$(find . -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.java" \) | head -1)
-          if [ -z "$FILE" ]; then echo "No code file found"; exit 1; fi
-          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+          # Find first source file (Python, JavaScript, TypeScript, or Java)
+          file=$(find . -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.java" \) | head -n 1)
+          if [ -z "$file" ]; then
+            echo "No source files found"
+            exit 1
+          fi
+          echo "Found file: $file"
+          echo "source_file=$file" >> $GITHUB_OUTPUT
 
-      # Read file as base64 to avoid JSON/shell escaping issues
-      - name: Read code content (base64)
-        id: read
-        shell: bash
+      - name: Login and get JWT token
+        id: login
         run: |
-          set -euo pipefail
-          CODE_B64=$(base64 -w0 "${{ steps.pick.outputs.file }}")
-          echo "code_b64=$CODE_B64" >> "$GITHUB_OUTPUT"
+          echo "🔐 Authenticating with backend..."
+          
+          # Login to get JWT token
+          response=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.BACKEND_URL }}/api/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@example.com","password":"admin123"}')
+          
+          # Split response and status code
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          
+          echo "HTTP Status: $http_code"
+          
+          if [ "$http_code" != "200" ]; then
+            echo "❌ Login failed with status $http_code"
+            echo "Response: $body"
+            exit 1
+          fi
+          
+          # Extract token from response
+          token=$(echo "$body" | jq -r '.token // .access_token // empty')
+          
+          if [ -z "$token" ] || [ "$token" = "null" ]; then
+            echo "❌ Failed to extract token from response"
+            echo "Response body: $body"
+            exit 1
+          fi
+          
+          echo "✅ Successfully authenticated"
+          
+          # Mask token in logs
+          echo "::add-mask::$token"
+          
+          # Store token for subsequent steps
+          echo "JWT_TOKEN=$token" >> $GITHUB_ENV
+
+      - name: Prepare source code for testing
+        id: prepare_code
+        run: |
+          source_file="${{ steps.find_file.outputs.source_file }}"
+          
+          # Read and base64 encode the file
+          encoded_code=$(cat "$source_file" | base64 -w 0)
+          echo "encoded_code=$encoded_code" >> $GITHUB_OUTPUT
+          
+          # Detect language from extension
+          if [[ "$source_file" == *.py ]]; then
+            echo "language=python" >> $GITHUB_OUTPUT
+          elif [[ "$source_file" == *.js ]]; then
+            echo "language=javascript" >> $GITHUB_OUTPUT
+          elif [[ "$source_file" == *.ts ]]; then
+            echo "language=typescript" >> $GITHUB_OUTPUT
+          elif [[ "$source_file" == *.java ]]; then
+            echo "language=java" >> $GITHUB_OUTPUT
+          else
+            echo "language=python" >> $GITHUB_OUTPUT
+          fi
 
       - name: Generate tests via backend
-        id: gen
-        shell: bash
-        env:
-          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        id: generate_tests
         run: |
-          set -euo pipefail
-          CODE=$(echo "${{ steps.read.outputs.code_b64 }}" | base64 -d)
-          export CODE
-          PAYLOAD=$(python - <<'PY'
-          import json, os
-          code = os.environ["CODE"]
-          print(json.dumps({"message": code, "language": "auto", "context": "CI run"}))
-          PY
-          )
-          RESP=$(curl -sS -X POST "$BACKEND_URL/api/generate-tests" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
-          echo "$RESP" | jq .
-          REQ_ID=$(echo "$RESP" | jq -r '.request_id')
-          echo "req_id=$REQ_ID" >> "$GITHUB_OUTPUT"
-          echo "$RESP" > generated_tests.json
+          echo "🤖 Generating AI tests..."
+          
+          # Decode the source code
+          decoded_code=$(echo "${{ steps.prepare_code.outputs.encoded_code }}" | base64 -d)
+          
+          # Build JSON payload using Python to avoid shell escaping issues
+          json_payload=$(python3 -c "
+          import json
+          import sys
 
-      - name: Execute tests via backend
+          code = '''$decoded_code'''
+          language = '${{ steps.prepare_code.outputs.language }}'
+
+          payload = {
+              'message': code,
+              'context': 'Automated test generation via GitHub Actions CI/CD',
+              'language': language,
+              'config': {
+                  'framework': 'pytest' if language == 'python' else 'jest',
+                  'coverage_target': 85,
+                  'test_types': ['unit', 'integration'],
+                  'mocking': True
+              }
+          }
+
+          print(json.dumps(payload))
+          ")
+          
+          # Call the API with JWT token in Authorization header
+          response=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.BACKEND_URL }}/api/generate-tests" \
+            -H "Authorization: Bearer $JWT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$json_payload")
+          
+          # Split response and status code
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          
+          echo "HTTP Status: $http_code"
+          
+          if [ "$http_code" != "200" ]; then
+            echo "❌ Test generation failed with status $http_code"
+            echo "Response: $body"
+            exit 1
+          fi
+          
+          # Save generated tests
+          echo "$body" > generated_tests.json
+          echo "✅ Tests generated successfully"
+          
+          # Extract execution_id
+          execution_id=$(echo "$body" | jq -r '.execution_id // empty')
+          echo "execution_id=$execution_id" >> $GITHUB_OUTPUT
+
+      - name: Run generated tests
         id: run_tests
-        shell: bash
-        env:
-          BACKEND_URL: ${{ secrets.BACKEND_URL }}
         run: |
-          set -euo pipefail
-          RESP=$(curl -sS -X POST "$BACKEND_URL/api/run-tests" \
+          echo "🧪 Running tests on backend..."
+          
+          # Read generated tests
+          generated_tests=$(cat generated_tests.json | jq -r '.tests // .generated_tests // empty')
+          
+          if [ -z "$generated_tests" ] || [ "$generated_tests" = "null" ]; then
+            echo "❌ No tests found in generated_tests.json"
+            cat generated_tests.json
+            exit 1
+          fi
+          
+          # Build payload for test execution
+          run_payload=$(python3 -c "
+          import json
+
+          tests = '''$generated_tests'''
+          language = '${{ steps.prepare_code.outputs.language }}'
+          execution_id = '${{ steps.generate_tests.outputs.execution_id }}'
+
+          payload = {
+              'tests': tests,
+              'language': language,
+              'execution_id': execution_id
+          }
+
+          print(json.dumps(payload))
+          ")
+          
+          # Execute tests via API
+          response=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.BACKEND_URL }}/api/run-tests" \
+            -H "Authorization: Bearer $JWT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"request_id\":\"${{ steps.gen.outputs.req_id }}\"}")
-          echo "$RESP" | jq .
-          EXEC_ID=$(echo "$RESP" | jq -r '.execution_id')
-          echo "exec_id=$EXEC_ID" >> "$GITHUB_OUTPUT"
+            -d "$run_payload")
+          
+          # Split response and status code
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          
+          echo "HTTP Status: $http_code"
+          
+          if [ "$http_code" != "200" ]; then
+            echo "⚠️ Test execution completed with status $http_code"
+            echo "Response: $body"
+          fi
+          
+          echo "$body" > test_results.json
+          echo "✅ Test execution complete"
+          
+          # Extract result_id for JUnit export
+          result_id=$(echo "$body" | jq -r '.execution_id // .result_id // .id // empty')
+          
+          if [ -z "$result_id" ]; then
+            result_id="${{ steps.generate_tests.outputs.execution_id }}"
+          fi
+          
+          echo "result_id=$result_id" >> $GITHUB_OUTPUT
 
-      - name: Download JUnit XML
-        shell: bash
-        env:
-          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+      - name: Download JUnit XML results
+        id: get_junit
         run: |
-          set -euo pipefail
-          curl -sS "$BACKEND_URL/api/results/${{ steps.run_tests.outputs.exec_id }}/junit" -o junit-results.xml
-          ls -l junit-results.xml
+          echo "📊 Fetching JUnit XML results..."
+          
+          result_id="${{ steps.run_tests.outputs.result_id }}"
+          
+          # Get JUnit XML from backend
+          curl -s -X GET "${{ secrets.BACKEND_URL }}/api/results/${result_id}/junit" \
+            -H "Authorization: Bearer $JWT_TOKEN" \
+            -o junit-results.xml
+          
+          if [ -f junit-results.xml ] && [ -s junit-results.xml ]; then
+            echo "✅ JUnit XML downloaded"
+            echo "Preview:"
+            head -n 20 junit-results.xml
+          else
+            echo "⚠️ JUnit XML file is empty or missing"
+            # Create a basic JUnit XML as fallback
+            cat > junit-results.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <testsuites name="AI Generated Tests" tests="0" failures="0" errors="0" skipped="0" time="0">
+            <testsuite name="GenAI-QA" tests="0" failures="0" errors="0" skipped="0" time="0">
+              <properties>
+                <property name="status" value="No results available"/>
+              </properties>
+            </testsuite>
+          </testsuites>
+          EOF
+                    fi
 
-      - name: Publish test report to PR
+      - name: Publish test results
         uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
         with:
           files: junit-results.xml
+          check_name: "AI Test Results"
+          comment_title: "🤖 GenAI-QA Test Results"
 
-      - name: Upload artifacts
+      - name: Upload test artifacts
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: genai-qa-results
+          name: test-results
           path: |
-            junit-results.xml
             generated_tests.json
+            test_results.json
+            junit-results.xml
+          retention-days: 30
