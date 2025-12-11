@@ -1,2 +1,2 @@
-def sum(a,b): #sum15
-    return a + b
+def minus(a,b): 
+    return a - b
