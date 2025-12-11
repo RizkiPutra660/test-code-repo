@@ -162,16 +162,21 @@ jobs:
           # Get the request_id from the generation response
           request_id=$(cat generated_tests.json | jq -r '.request_id // empty')
           
+          # Decode the original source code
+          source_code=$(echo "${{ steps.prepare_code.outputs.encoded_code }}" | base64 -d)
+          
           # Build payload for test execution
           run_payload=$(python3 -c "
           import json
 
-          tests = '''$generated_tests'''
+          test_code = '''$generated_tests'''
+          source_code = '''$source_code'''
           language = '${{ steps.prepare_code.outputs.language }}'
           request_id = '$request_id'
 
           payload = {
-              'tests': tests,
+              'test_code': test_code,
+              'source_code': source_code,
               'language': language,
               'request_id': request_id
           }
