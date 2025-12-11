@@ -204,14 +204,17 @@ jobs:
           echo "$body" > test_results.json
           echo "✅ Test execution complete"
           
-          # Extract result_id for JUnit export
-          result_id=$(echo "$body" | jq -r '.execution_id // .result_id // .id // empty')
+          # Extract execution_log_id from the results
+          execution_log_id=$(echo "$body" | jq -r '.results.execution_log_id // .execution_log_id // empty')
           
-          if [ -z "$result_id" ]; then
-            result_id="$request_id"
+          if [ -z "$execution_log_id" ] || [ "$execution_log_id" = "null" ]; then
+            echo "⚠️ No execution_log_id found in response"
+            echo "Response structure:"
+            echo "$body" | jq '.'
+            execution_log_id="$request_id"
           fi
           
-          echo "result_id=$result_id" >> $GITHUB_OUTPUT
+          echo "result_id=$execution_log_id" >> $GITHUB_OUTPUT
 
       - name: Download JUnit XML results
         id: get_junit
