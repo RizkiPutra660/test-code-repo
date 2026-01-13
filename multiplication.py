@@ -1,2 +1,2 @@
-def multi(a,b):
+def multi(a,b): #a*b
     return a * b
