@@ -1,2 +1,2 @@
-def minus(a,b): #a-b
+def minus(a,b): 
     return a - b
